@@ -209,10 +209,34 @@ def fmt_int(n):
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     """Convert a DataFrame to Excel bytes for download."""
+    df = df.copy()
+
+    # De-duplicate column names. If the source file already had a column with
+    # the same name as one of our aliases (e.g. both "District" and
+    # "DISTRICT_NAME"), the alias-rename step can leave two columns with an
+    # identical label. That corrupts row.get(...) upstream and can also
+    # corrupt the Excel write, so we defensively rename any repeats here.
+    if df.columns.duplicated().any():
+        seen = {}
+        new_cols = []
+        for c in df.columns:
+            if c in seen:
+                seen[c] += 1
+                new_cols.append(f"{c}_{seen[c]}")
+            else:
+                seen[c] = 0
+                new_cols.append(c)
+        df.columns = new_cols
+
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Data")
         ws = writer.sheets["Data"]
+        # Defensive: some pandas/openpyxl combinations can leave a workbook's
+        # only sheet not marked as visible/active, which raises
+        # "IndexError: At least one sheet must be visible" on save.
+        ws.sheet_state = "visible"
+        writer.book.active = 0
         # Auto-fit columns
         for col in ws.columns:
             max_len = max((len(str(cell.value)) if cell.value else 0) for cell in col)
@@ -221,9 +245,14 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 def xl_btn(df: pd.DataFrame, filename: str, label: str = "⬇️ Export Excel"):
     """Render a small Excel download button below a chart."""
+    try:
+        data = to_excel_bytes(df)
+    except Exception as e:
+        st.error(f"❌ Couldn't build this Excel file: {e}")
+        return
     st.download_button(
         label=label,
-        data=to_excel_bytes(df),
+        data=data,
         file_name=f"{filename}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"xl_{filename}_{id(df)}",
@@ -351,6 +380,23 @@ def load_data(files_bytes):
                 rename_map[alias] = canonical
     if rename_map:
         raw = raw.rename(columns=rename_map)
+
+    # If renaming created a collision (e.g. the file already had both
+    # "Dic_Name" and "DIC_Name" as separate columns, which both map to the
+    # same canonical name), de-duplicate rather than silently merging them —
+    # row.get() on a duplicate-labelled column returns a Series, not a
+    # scalar, which corrupts every downstream row and can break Excel export.
+    if raw.columns.duplicated().any():
+        seen = {}
+        new_cols = []
+        for c in raw.columns:
+            if c in seen:
+                seen[c] += 1
+                new_cols.append(f"{c}_{seen[c]}")
+            else:
+                seen[c] = 0
+                new_cols.append(c)
+        raw.columns = new_cols
 
     # Keep every column from the source file (not just a fixed whitelist), so
     # fields like Email, MobileNo, Latitude, Longitude etc. are preserved too.
