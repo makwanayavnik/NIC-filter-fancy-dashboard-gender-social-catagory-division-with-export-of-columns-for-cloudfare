@@ -4,7 +4,7 @@ Udhyam NIC Code Analytics Dashboard — Fancy Edition
 Run:  python -m streamlit run udhyam_nic_dashboard.py --server.maxUploadSize 1000
 
 Requirements:
-    pip install streamlit pandas openpyxl plotly boto3
+    pip install streamlit pandas openpyxl xlsxwriter plotly boto3
 
 Data source:
     Files are auto-loaded from a Cloudflare R2 bucket (S3-compatible API) using
@@ -208,14 +208,21 @@ def fmt_int(n):
     return f"{int(n):,}"
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Convert a DataFrame to Excel bytes for download."""
+    """Convert a DataFrame to Excel bytes for download.
+
+    Uses the xlsxwriter engine (not openpyxl) because certain
+    pandas + openpyxl version combinations have a known bug where
+    ExcelWriter's internal "remove the default sheet" step can leave the
+    workbook with no visible sheet at all, raising
+    "IndexError: At least one sheet must be visible" on save. xlsxwriter
+    builds the workbook differently and isn't affected by that bug.
+    """
     df = df.copy()
 
     # De-duplicate column names. If the source file already had a column with
     # the same name as one of our aliases (e.g. both "District" and
     # "DISTRICT_NAME"), the alias-rename step can leave two columns with an
-    # identical label. That corrupts row.get(...) upstream and can also
-    # corrupt the Excel write, so we defensively rename any repeats here.
+    # identical label, which corrupts row.get(...) upstream.
     if df.columns.duplicated().any():
         seen = {}
         new_cols = []
@@ -229,18 +236,17 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.columns = new_cols
 
     buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Data")
         ws = writer.sheets["Data"]
-        # Defensive: some pandas/openpyxl combinations can leave a workbook's
-        # only sheet not marked as visible/active, which raises
-        # "IndexError: At least one sheet must be visible" on save.
-        ws.sheet_state = "visible"
-        writer.book.active = 0
-        # Auto-fit columns
-        for col in ws.columns:
-            max_len = max((len(str(cell.value)) if cell.value else 0) for cell in col)
-            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
+        # Auto-fit columns (xlsxwriter API: set_column(first_col, last_col, width))
+        for i, col_name in enumerate(df.columns):
+            if len(df):
+                body_max = df[col_name].map(lambda v: len(str(v)) if pd.notna(v) else 0).max()
+            else:
+                body_max = 0
+            max_len = max(body_max, len(str(col_name)))
+            ws.set_column(i, i, min(max_len + 4, 60))
     return buf.getvalue()
 
 def xl_btn(df: pd.DataFrame, filename: str, label: str = "⬇️ Export Excel"):
