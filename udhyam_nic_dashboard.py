@@ -334,7 +334,10 @@ def get_r2_client():
         endpoint_url=f"https://{cfg['account_id']}.r2.cloudflarestorage.com",
         aws_access_key_id=cfg["access_key_id"],
         aws_secret_access_key=cfg["secret_access_key"],
-        config=Config(signature_version="s3v4"),
+        config=Config(
+            signature_version="s3v4",
+            retries={"max_attempts": 8, "mode": "adaptive"},  # auto backoff on 429/throttling
+        ),
         region_name="auto",
     )
 
@@ -537,6 +540,18 @@ with st.sidebar:
                             try:
                                 fbytes = fetch_r2_object(bucket, f["key"], f["etag"])
                                 file_data.append((f["key"].split("/")[-1], fbytes))
+                            except ClientError as e:
+                                code = e.response.get("Error", {}).get("Code", "")
+                                status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                                if status == 429 or code in ("429", "SlowDown", "TooManyRequests"):
+                                    st.warning(
+                                        f"⏳ Rate-limited by R2 while fetching `{f['key']}` "
+                                        "even after automatic retries. Wait a minute, then click 🔄 to try again — "
+                                        "this usually means too many requests hit R2 in a short burst "
+                                        "(common right after a fresh deploy, or with a large file selection)."
+                                    )
+                                else:
+                                    st.warning(f"Could not fetch `{f['key']}`: {e}")
                             except Exception as e:
                                 st.warning(f"Could not fetch `{f['key']}`: {e}")
                     st.caption(f"📦 {len(file_data)} of {len(r2_files)} file(s) loaded from R2")
