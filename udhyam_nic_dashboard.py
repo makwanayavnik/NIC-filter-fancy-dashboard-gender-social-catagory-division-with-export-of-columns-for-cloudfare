@@ -8,9 +8,9 @@ Requirements:
 
 Data source:
     Files are auto-loaded from a Cloudflare R2 bucket (S3-compatible API) using
-    boto3. Configure credentials in .streamlit/secrets.toml locally, or in the
-    "Secrets" panel of your Streamlit Community Cloud app settings:
+    boto3. Configure credentials one of two ways:
 
+    Option A — secrets.toml (Streamlit Community Cloud / local dev):
         [r2]
         account_id         = "your-cloudflare-account-id"
         access_key_id      = "your-r2-access-key-id"
@@ -18,12 +18,21 @@ Data source:
         bucket_name        = "your-bucket-name"
         prefix             = ""   # optional sub-folder inside the bucket
 
-    A manual "Upload files" fallback is still available from the sidebar.
+        Locally: save as .streamlit/secrets.toml next to this script.
+        Streamlit Cloud: paste the same content into your app's Secrets panel.
+
+    Option B — environment variables (Hugging Face Spaces, Render, Railway,
+    or any host that injects secrets as env vars rather than a file):
+        R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME,
+        and optionally R2_PREFIX.
+
+    A manual "Upload files" fallback is always available from the sidebar too.
 """
 
 import streamlit as st
 import pandas as pd
 import json
+import os
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
@@ -289,11 +298,37 @@ def tur_band(val):
 # ── Cloudflare R2 (S3-compatible) access ──────────────────────────────────────
 R2_EXTENSIONS = (".xlsx", ".xls", ".csv")
 
+def get_r2_config():
+    """Return R2 credentials as a dict, or None if not configured.
+
+    Tries, in order:
+    1. st.secrets["r2"]  — Streamlit Community Cloud / local .streamlit/secrets.toml
+    2. Environment variables — Hugging Face Spaces, Render, Railway, etc.
+       expose secrets this way, not as a secrets.toml file. Set:
+       R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME,
+       and optionally R2_PREFIX.
+    """
+    try:
+        if "r2" in st.secrets:
+            return dict(st.secrets["r2"])
+    except Exception:
+        pass
+
+    env_cfg = {
+        "account_id": os.environ.get("R2_ACCOUNT_ID"),
+        "access_key_id": os.environ.get("R2_ACCESS_KEY_ID"),
+        "secret_access_key": os.environ.get("R2_SECRET_ACCESS_KEY"),
+        "bucket_name": os.environ.get("R2_BUCKET_NAME"),
+        "prefix": os.environ.get("R2_PREFIX", ""),
+    }
+    if env_cfg["account_id"] and env_cfg["access_key_id"] and env_cfg["secret_access_key"] and env_cfg["bucket_name"]:
+        return env_cfg
+    return None
+
 @st.cache_resource(show_spinner=False)
 def get_r2_client():
-    """Build a boto3 S3 client pointed at the Cloudflare R2 endpoint.
-    Credentials come from st.secrets["r2"] (see .streamlit/secrets.toml)."""
-    cfg = st.secrets["r2"]
+    """Build a boto3 S3 client pointed at the Cloudflare R2 endpoint."""
+    cfg = get_r2_config()
     return boto3.client(
         "s3",
         endpoint_url=f"https://{cfg['account_id']}.r2.cloudflarestorage.com",
@@ -436,10 +471,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### ☁️ Data Source")
 
-    try:
-        has_r2_secrets = "r2" in st.secrets
-    except Exception:
-        has_r2_secrets = False
+    r2_cfg = get_r2_config()
+    has_r2_secrets = r2_cfg is not None
     data_source = st.radio(
         "Load data from",
         ["Cloudflare R2 (auto)", "Upload files manually"],
@@ -460,17 +493,19 @@ with st.sidebar:
     else:
         if not has_r2_secrets:
             st.error(
-                "No R2 credentials found. Add an **[r2]** section to "
-                "`.streamlit/secrets.toml` (locally) or to your app's **Secrets** "
-                "panel on Streamlit Community Cloud — see the script's docstring "
-                "for the exact format."
+                "No R2 credentials found. Either add an **[r2]** section to "
+                "`.streamlit/secrets.toml` (local dev) / your app's **Secrets** "
+                "panel on Streamlit Community Cloud, **or** set the "
+                "`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, "
+                "`R2_BUCKET_NAME` environment variables (Hugging Face Spaces / "
+                "Render / Railway) — see the script's docstring for details."
             )
         else:
-            cfg = st.secrets["r2"]
+            cfg = r2_cfg
             try:
                 bucket = cfg["bucket_name"]
             except KeyError:
-                st.error("Your [r2] secrets are missing `bucket_name`.")
+                st.error("Your R2 config is missing `bucket_name`.")
                 bucket = None
 
             if bucket:
